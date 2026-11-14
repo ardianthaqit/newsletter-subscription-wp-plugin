@@ -2,21 +2,37 @@ import numpy as np, subprocess, wave, sys
 from PIL import Image, ImageDraw, ImageFont, ImageFilter
 OUT=sys.argv[1]; W,H=720,1280; FPS=30; SR=44100
 rng=np.random.default_rng(7)
-# (start,end,text,mode)
-S=[(0.0,3.2,"DAY 3 SINCE THE POWER DIED.","door"),
-   (3.2,6.6,"THE RADIO HAD ONE RULE:\nNEVER OPEN THE DOOR AFTER DARK.","door"),
-   (6.6,9.4,"TONIGHT...\nSOMEONE KNOCKED.","knock"),
-   (9.4,13.4,"\"IT'S ME. LET ME IN.\nIT'S SO COLD OUT HERE.\"","door"),
-   (13.4,16.4,"IT WAS MY BROTHER'S VOICE.","door"),
-   (16.4,19.4,"MY BROTHER DIED ON DAY 1.","dark"),
-   (19.4,22.6,"I DIDN'T OPEN THE DOOR.","door"),
-   (22.6,25.6,"THEN THE KNOCKING STOPPED...","door"),
-   (25.6,28.6,"\"THANK YOU,\" IT WHISPERED.","door"),
-   (28.6,30.6,"FROM BEHIND ME.","eyes"),
-   (30.6,34.0,"WOULD YOU HAVE\nOPENED IT?","end")]
+import os
+MODELS=os.environ.get("KOKORO_DIR",os.path.join(sys.argv[2],"models"))
+from kokoro_onnx import Kokoro
+K=Kokoro(MODELS+"/kokoro-v1.0.onnx",MODELS+"/voices-v1.0.bin")
+# (caption, spoken line, mode, voice, speed, extra seconds after speech)
+SCRIPT=[("DAY 3 SINCE THE POWER DIED.","Day three... since the power died.","door","am_onyx",0.9,0.5),
+ ("THE RADIO HAD ONE RULE:\nNEVER OPEN THE DOOR AFTER DARK.","The radio had one rule. Never open the door after dark.","door","am_onyx",0.9,0.4),
+ ("TONIGHT...\nSOMEONE KNOCKED.","Tonight... someone knocked.","knock","am_onyx",0.85,2.0),
+ ("\"IT'S ME. LET ME IN.\nIT'S SO COLD OUT HERE.\"","It's me. Let me in. It's so cold out here.","door","am_echo",0.8,0.6),
+ ("IT WAS MY BROTHER'S VOICE.","It was my brother's voice.","door","am_onyx",0.9,0.5),
+ ("MY BROTHER DIED ON DAY 1.","My brother died... on day one.","dark","am_onyx",0.85,1.0),
+ ("I DIDN'T OPEN THE DOOR.","I didn't open the door.","knock","am_onyx",0.9,2.2),
+ ("THEN THE KNOCKING STOPPED...","Then the knocking stopped.","door","am_onyx",0.85,1.4),
+ ("\"THANK YOU,\" IT WHISPERED.","Thank you... it whispered.","door","am_onyx",0.8,0.4),
+ ("FROM BEHIND ME.","From behind me.","eyes","am_onyx",0.8,1.6),
+ ("WOULD YOU HAVE\nOPENED IT?","Would you have opened it?","end","am_onyx",0.9,2.0)]
+VSR=24000; S=[]; VO=[]; t0=0.6; KNOCKS=[]
+for cap,line,mode,voice,spd,extra in SCRIPT:
+    a,_=K.create(line,voice=voice,speed=spd,lang="en-us"); a=a/np.max(np.abs(a))*0.85
+    if voice!="am_onyx":  # ghostly echo for the brother
+        e=a.copy()
+        for d,g in((0.09,0.5),(0.2,0.35),(0.33,0.2)): e=np.concatenate([e,np.zeros(int(d*VSR))]); e[int(d*VSR):int(d*VSR)+len(a)]+=a*g
+        a=e/np.max(np.abs(e))*0.75
+    dur=len(a)/VSR; st=t0 if not S else S[-1][1]
+    if mode=="knock":
+        n=3 if not KNOCKS else 6
+        KNOCKS+=[st+dur+0.25+i*(0.45 if n==3 else 0.32) for i in range(n)]
+    S.append((st,st+dur+extra,cap,mode,dur)); VO.append((st,a))
+S[0]=(0.0,)+S[0][1:]
 T=S[-1][1]; N=int(T*FPS)
-KNOCKS=[6.9,7.3,7.7,8.6,9.0,10.8,11.2,20.0,20.4,20.8,21.2,21.6]
-STING=28.6
+STING=[s for s in S if s[3]=="eyes"][0][0]
 # ---------- base scene: door in dark hallway ----------
 yy,xx=np.mgrid[0:H,0:W].astype(np.float32)
 base=np.zeros((H,W,3),np.float32)+np.array([.10,.09,.08])
@@ -38,7 +54,7 @@ small=ImageFont.truetype("/usr/share/fonts/opentype/inter/Inter-Bold.otf",30)
 def noise(): return rng.normal(0,0.035,(H//2,W//2)).astype(np.float32).repeat(2,0).repeat(2,1)[...,None]
 def caption(img,text,p,col=(240,236,228)):
     d=ImageDraw.Draw(img); words=text.replace("\n"," \n ").split(" ")
-    n=max(1,int(round(p*len([w for w in words if w!="\n"])*3.0+0.5)))
+    n=max(1,int(round(p*len([w for w in words if w!="\n"])+0.5)))
     shown=[];c=0
     for w in words:
         if w=="\n": shown.append(w);continue
@@ -60,7 +76,7 @@ def caption(img,text,p,col=(240,236,228)):
 p=subprocess.Popen(["ffmpeg","-y","-loglevel","error","-f","rawvideo","-pix_fmt","rgb24","-s",f"{W}x{H}","-r",str(FPS),"-i","-",
    "-vf","scale=1080:1920:flags=lanczos","-c:v","libx264","-pix_fmt","yuv420p","-crf","29","-preset","slow","-tune","grain","/tmp/v.mp4".replace("/tmp",sys.argv[2])],stdin=subprocess.PIPE)
 for f in range(N):
-    t=f/FPS; sc=[s for s in S if s[0]<=t<s[1]][0]; mode=sc[3]; prog=(t-sc[0])/(sc[1]-sc[0])
+    t=f/FPS; sc=[s for s in S if s[0]<=t<s[1]][0]; mode=sc[3]; prog=(t-max(sc[0],t0 if sc is S[0] else sc[0]))/max(sc[4],0.1)
     lx=W/2+np.sin(t*0.9)*90+np.sin(t*2.3)*25; ly=700+np.sin(t*0.7)*80
     rad=260+np.sin(t*5)*6
     flick=1.0 if rng.random()>0.04 else 0.35
@@ -68,7 +84,7 @@ for f in range(N):
     for k in KNOCKS:
         if 0<=t-k<0.15: shake=18*(1-(t-k)/0.15); flick=1.25
     img=base.copy()
-    if mode=="knock" or (KNOCKS[0]<t<9.4) or (19.4<t<22.6):
+    if mode=="knock":
         img[gap]=[.5,.4,.2] if int(t*3)%2 else [.05,.05,.05]  # shadow under door
     light=np.exp(-(((xx-lx)**2+(yy-ly)**2)/(2*rad**2)))[...,None]*1.9*flick+0.04
     if mode=="dark": light=light*0.18
@@ -84,11 +100,11 @@ for f in range(N):
     out=np.clip(out*255,0,255).astype(np.uint8)
     im=Image.fromarray(out)
     if mode=="end":
-        caption(im,sc[2],prog,(220,30,30))
+        caption(im,sc[2],min(1,max(0,prog)),(220,30,30))
         d=ImageDraw.Draw(im); s="COMMENT BELOW  ▼"; bb=d.textbbox((0,0),s,font=small)
         if prog>0.4: d.text(((W-bb[2])//2,1050),s,font=small,fill=(200,200,200))
     else:
-        caption(im,sc[2],min(1,prog*1.6),(255,70,60) if mode=="eyes" else (240,236,228))
+        caption(im,sc[2],min(1,max(0,prog)),(255,70,60) if mode=="eyes" else (240,236,228))
     p.stdin.write(im.tobytes())
 p.stdin.close(); p.wait()
 # ---------- audio ----------
@@ -111,8 +127,14 @@ x=np.arange(int(2.5*SR))/SR; e=np.exp(-x*1.5)
 sting=sum(np.sin(2*np.pi*f*x) for f in(311,329,466,493,659))*0.12+rng.normal(0,1,len(x))*0.3*np.exp(-x*4)
 add(STING,sting*e)
 x=np.arange(int(1.2*SR))/SR; add(STING-1.2,rng.normal(0,1,len(x))*(x/1.2)**3*0.25)  # riser
-x,e=env(1.5,3); add(25.8,np.convolve(rng.normal(0,1,len(x)),np.ones(30)/30,'same')*np.sin(np.pi*x/1.5)*0.5)  # whisper
-a=a/np.max(np.abs(a))*0.9; a[int(33.2*SR):]*=np.linspace(1,0,n-int(33.2*SR))
+x,e=env(1.5,3); add(STING-2.5,np.convolve(rng.normal(0,1,len(x)),np.ones(30)/30,'same')*np.sin(np.pi*x/1.5)*0.5)  # whisper
+a=a/np.max(np.abs(a))*0.45
+vo=np.zeros(n)
+for st,v in VO:
+    v=np.interp(np.arange(int(len(v)*SR/VSR))*VSR/SR,np.arange(len(v)),v); i=int(st*SR); j=min(n,i+len(v)); vo[i:j]+=v[:j-i]
+duck=np.convolve(np.abs(vo)>0.02,np.ones(SR//5)/(SR//5),'same')
+a=a*(1-0.45*duck)+vo
+a=np.tanh(a*1.6)/np.tanh(1.6); f0=int((T-1.0)*SR); a[f0:]*=np.linspace(1,0,n-f0)
 pcm=(a*32767).astype(np.int16); st=np.stack([pcm,pcm],1)
 with wave.open(sys.argv[2]+"/a.wav","wb") as w: w.setnchannels(2);w.setsampwidth(2);w.setframerate(SR);w.writeframes(st.tobytes())
-subprocess.run(["ffmpeg","-y","-loglevel","error","-i",sys.argv[2]+"/v.mp4","-i",sys.argv[2]+"/a.wav","-c:v","copy","-c:a","aac","-b:a","192k","-shortest","-movflags","+faststart",OUT],check=True)
+subprocess.run(["ffmpeg","-y","-loglevel","error","-i",sys.argv[2]+"/v.mp4","-i",sys.argv[2]+"/a.wav","-c:v","copy","-af","loudnorm=I=-14:TP=-1:LRA=11","-c:a","aac","-b:a","192k","-shortest","-movflags","+faststart",OUT],check=True)
